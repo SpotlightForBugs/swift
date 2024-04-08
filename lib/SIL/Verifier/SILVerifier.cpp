@@ -153,12 +153,20 @@ static bool isArchetypeValidInFunction(ArchetypeType *A, const SILFunction *F) {
 
 namespace {
 
-/// When resilience is bypassed, direct access is legal, but the decls are still
-/// resilient.
+/// When resilience is bypassed or package serialization is enabled, direct access
+/// is legal, but the decls are still resilient.
 template <typename DeclType>
 bool checkResilience(DeclType *D, ModuleDecl *M,
-                     ResilienceExpansion expansion) {
-  return !D->getModuleContext()->getBypassResilience() &&
+                     ResilienceExpansion expansion,
+                     bool isSerialized) {
+  // Check whether the SIL definition referencing D is serialized but
+  // in minimal resilience expansion context (e.g. M was resiliently
+  // built); this means package serialization was enabled and direct
+  // access should be allowed.
+  auto serializedInResilientMode =
+      expansion == ResilienceExpansion::Minimal && isSerialized;
+  return !serializedInResilientMode &&
+         !D->getModuleContext()->getBypassResilience() &&
          D->isResilient(M, expansion);
 }
 
@@ -193,6 +201,7 @@ namespace {
 /// Verify invariants on a key path component.
 void verifyKeyPathComponent(SILModule &M,
                             TypeExpansionContext typeExpansionContext,
+                            bool isSerialized,
                             llvm::function_ref<void(bool, StringRef)> require,
                             CanType &baseTy,
                             CanType leafTy,
@@ -300,7 +309,7 @@ void verifyKeyPathComponent(SILModule &M,
             "property decl should be a member of the base with the same type "
             "as the component");
     require(property->hasStorage(), "property must be stored");
-    require(!checkResilience(property, M.getSwiftModule(), expansion),
+    require(!checkResilience(property, M.getSwiftModule(), expansion, isSerialized),
             "cannot access storage of resilient property");
     auto propertyTy =
         loweredBaseTy.getFieldType(property, M, typeExpansionContext);
@@ -2469,13 +2478,12 @@ public:
     SILGlobalVariable *RefG = AGI->getReferencedGlobal();
     if (auto *VD = RefG->getDecl()) {
       require(!checkResilience(VD, F.getModule().getSwiftModule(),
-                               F.getResilienceExpansion()),
+                               F.getResilienceExpansion(), F.isSerialized()),
               "cannot access storage of resilient global");
     }
     if (F.isSerialized()) {
-      // If it has a package linkage at this point, package CMO must
-      // have been enabled, so opt in for visibility.
       require(RefG->isSerialized()
+              // RefG should be visibile if it has package linkage in serialized context.
               || hasPublicOrPackageVisibility(RefG->getLinkage(), /*includePackage*/ true),
               "alloc_global inside fragile function cannot "
               "reference a private or hidden symbol");
@@ -2490,13 +2498,13 @@ public:
         "global_addr/value must be the type of the variable it references");
     if (auto *VD = RefG->getDecl()) {
       require(!checkResilience(VD, F.getModule().getSwiftModule(),
-                               F.getResilienceExpansion()),
+                               F.getResilienceExpansion(), F.isSerialized()),
               "cannot access storage of resilient global");
     }
+
     if (F.isSerialized()) {
-      // If it has a package linkage at this point, package CMO must
-      // have been enabled, so opt in for visibility.
       require(RefG->isSerialized()
+              // RefG should be visibile if it has package linkage in serialized context.
               || hasPublicOrPackageVisibility(RefG->getLinkage(), /*includePackage*/ true),
               "global_addr/value inside fragile function cannot "
               "reference a private or hidden symbol");
@@ -3415,7 +3423,7 @@ public:
             "Cannot build a struct with unreferenceable storage from elements "
             "using StructInst");
     require(!checkResilience(structDecl, F.getModule().getSwiftModule(),
-                             F.getResilienceExpansion()),
+                             F.getResilienceExpansion(), F.isSerialized()),
             "cannot access storage of resilient struct");
     require(SI->getType().isObject(),
             "StructInst must produce an object");
@@ -3652,7 +3660,7 @@ public:
     require(cd, "Operand of dealloc_ref must be of class type");
 
     require(!checkResilience(cd, F.getModule().getSwiftModule(),
-                             F.getResilienceExpansion()),
+                             F.getResilienceExpansion(), F.isSerialized()),
             "cannot directly deallocate resilient class");
   }
   void checkDeallocPartialRefInst(DeallocPartialRefInst *DPRI) {
@@ -3780,7 +3788,7 @@ public:
     StructDecl *sd = operandTy.getStructOrBoundGenericStruct();
     require(sd, "must struct_extract from struct");
     require(!checkResilience(sd, F.getModule().getSwiftModule(),
-                             F.getResilienceExpansion()),
+                             F.getResilienceExpansion(), F.isSerialized()),
             "cannot access storage of resilient struct");
     require(!EI->getField()->isStatic(),
             "cannot get address of static property with struct_element_addr");
@@ -3836,7 +3844,7 @@ public:
     StructDecl *sd = operandTy.getStructOrBoundGenericStruct();
     require(sd, "struct_element_addr operand must be struct address");
     require(!checkResilience(sd, F.getModule().getSwiftModule(),
-                             F.getResilienceExpansion()),
+                             F.getResilienceExpansion(), F.isSerialized()),
             "cannot access storage of resilient struct");
     require(EI->getType().isAddress(),
             "result of struct_element_addr must be address");
@@ -3877,8 +3885,9 @@ public:
     SILType operandTy = EI->getOperand()->getType();
     ClassDecl *cd = operandTy.getClassOrBoundGenericClass();
     require(cd, "ref_element_addr operand must be a class instance");
+
     require(!checkResilience(cd, F.getModule().getSwiftModule(),
-                             F.getResilienceExpansion()),
+                             F.getResilienceExpansion(), F.isSerialized()),
             "cannot access storage of resilient class");
 
     require(EI->getField()->getDeclContext() ==
@@ -3904,7 +3913,7 @@ public:
     ClassDecl *cd = operandTy.getClassOrBoundGenericClass();
     require(cd, "ref_tail_addr operand must be a class instance");
     require(!checkResilience(cd, F.getModule().getSwiftModule(),
-                             F.getResilienceExpansion()),
+                             F.getResilienceExpansion(), F.isSerialized()),
             "cannot access storage of resilient class");
     require(cd, "ref_tail_addr operand must be a class instance");
     checkAddressWalkerCanVisitAllTransitiveUses(RTAI);
@@ -3915,7 +3924,7 @@ public:
     StructDecl *sd = operandTy.getStructOrBoundGenericStruct();
     require(sd, "must struct_extract from struct");
     require(!checkResilience(sd, F.getModule().getSwiftModule(),
-                             F.getResilienceExpansion()),
+                             F.getResilienceExpansion(), F.isSerialized()),
             "cannot access storage of resilient struct");
     if (F.hasOwnership()) {
       // Make sure that all of our destructure results ownership kinds are
@@ -5730,8 +5739,8 @@ public:
           hasIndices = false;
           break;
         }
-      
-        verifyKeyPathComponent(F.getModule(), F.getTypeExpansionContext(),
+
+        verifyKeyPathComponent(F.getModule(), F.getTypeExpansionContext(), F.isSerialized(),
           [&](bool reqt, StringRef message) { _require(reqt, message); },
           baseTy,
           leafTy,
@@ -7205,6 +7214,7 @@ void SILProperty::verify(const SILModule &M) const {
             ResilienceExpansion::Maximal);
     verifyKeyPathComponent(const_cast<SILModule&>(M),
                            typeExpansionContext,
+                           isSerialized(),
                            require,
                            baseTy,
                            leafTy,
