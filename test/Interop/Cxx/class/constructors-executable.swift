@@ -44,4 +44,18 @@ CxxConstructorTestSuite.test("TemplatedConstructor") {
   expectEqual(2, instance.value.i)
 }
 
+CxxConstructorTestSuite.test("implicit default ctor") {
+  // Make sure that fields of C++ structs are zeroed out.
+
+  let instance1 = ConstructorWithParam()
+  expectEqual(0, instance1.x)
+
+  let instance2 = IntWrapper()
+  expectEqual(0, instance2.x)
+
+  let instance3 = CopyAndMoveConstructor()
+  expectEqual(0, instance3.value)
+  expectNil(instance3.ptr)
+}
+
 runAllTests()
