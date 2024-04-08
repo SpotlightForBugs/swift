@@ -1,5 +1,7 @@
+// RUN: %target-run-simple-swift(-I %S/Inputs/ -cxx-interoperability-mode=swift-5.10)
 // RUN: %target-run-simple-swift(-I %S/Inputs/ -cxx-interoperability-mode=swift-6)
 // RUN: %target-run-simple-swift(-I %S/Inputs/ -cxx-interoperability-mode=upcoming-swift)
+// RUN: %target-run-simple-swift(-I %S/Inputs/ -cxx-interoperability-mode=swift-5.10 -O)
 // RUN: %target-run-simple-swift(-I %S/Inputs/ -cxx-interoperability-mode=swift-6 -O)
 // RUN: %target-run-simple-swift(-I %S/Inputs/ -cxx-interoperability-mode=upcoming-swift -O)
 //
